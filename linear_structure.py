@@ -885,16 +885,19 @@ def get_factors_last_layer(keywords, up_to_layer=12):
 
     # 2. feed forward trace
     renormalized_ff_layers = []
+    all_ff_biases = []
     relevant_ff_layers = lambda layer: [ln_terms[layer][-1]]+[ln for lyr in ln_terms[layer+1:] for ln in lyr]
-    for layer, ff_term in enumerate(ff_terms, start=1):
+    for layer, (ff_term, ff_bias) in enumerate(ff_terms, start=1):
         relevant_layers = relevant_ff_layers(layer)
         all_ff_gains = reduce(torch.mul, (ln['gain'] for ln in relevant_layers))
         all_ff_std = reduce(torch.mul, (ln['std'] for ln in relevant_layers))
-        renormalized_ff_layers.append((all_ff_gains * (ff_term / all_ff_std)).squeeze(0))
+        renormalized_ff_layers.append((all_ff_gains * ((ff_term - ff_bias) / all_ff_std)).squeeze(0))
+        all_ff_biases.append(all_ff_gains * (ff_bias / all_ff_std))
     ff_contrib = sum(renormalized_ff_layers)
 
     # 3. multi-head attention trace
     renormalized_mha_layers = []
+    all_output_bias_corrections = []
     relevant_mha_layers = lambda layer: [ln for lyr in ln_terms[layer:] for ln in lyr]
     for layer, (weights, unweighted_outputs, output_bias_correction) in enumerate(mha_terms, start=1):
         relevant_layers = relevant_mha_layers(layer)
@@ -903,7 +906,7 @@ def get_factors_last_layer(keywords, up_to_layer=12):
         # to get the original raw hidden states, we'd need:
         # self_keywords['weights'].unsqueeze(-1) * unweighted_outputs.unsqueeze(-3)).sum(1).sum(-2) + self.output.dense.bias
         # so we have to divde the bias term by the number of items that go through the linear projections. Yay.
-        weight_applied = (weights.unsqueeze(-1) * unweighted_outputs.unsqueeze(-3)).sum(1).sum(-2) + output_bias_correction
+        mha_term = (weights.unsqueeze(-1) * unweighted_outputs.unsqueeze(-3)).sum(1).sum(-2)
         # mha_terms_unbound = [
         #     [
         #         attended_tok + (output_bias_correction / (weight_applied.size(1) * weight_applied.size(-2)))
@@ -912,7 +915,8 @@ def get_factors_last_layer(keywords, up_to_layer=12):
         #     for all_in_head in weight_applied.unbind(dim=1)
         # ]
         # mha_terms_unbound = [t / len(mha_terms_unbound)) for t in mha_terms_unbound]
-        renormalized_mha_layers.append((all_mha_gains * (weight_applied / all_mha_std)).squeeze(0))
+        renormalized_mha_layers.append((all_mha_gains * (mha_term / all_mha_std)).squeeze(0))
+        all_output_bias_corrections.append(all_mha_gains * (output_bias_correction / all_mha_std))
     # n_heads = len(renormalized_mha_layers[0])
     # mha_contribs = [
     #     sum(layer[h_idx] for layer in renormalized_mha_layers)
@@ -938,7 +942,7 @@ def get_factors_last_layer(keywords, up_to_layer=12):
         all_mean_relevant_std = reduce(torch.mul, (ln['std'] for ln in all_mean_relevant))
         mean_correction = all_mean_relevant_gains  * (ln_term['mean']/ all_mean_relevant_std)
         all_corrective_terms.append((bias_correction - mean_correction).squeeze(0))
-    correct_contrib = sum(all_corrective_terms)
+    correct_contrib = sum(all_corrective_terms) + sum(all_output_bias_corrections).squeeze(0) + sum(all_ff_biases).squeeze(0)
     all_factors = {
         'ipt':ipt_contrib,
         'ff':ff_contrib,
@@ -949,7 +953,9 @@ def get_factors_last_layer(keywords, up_to_layer=12):
 
 @torch.no_grad()
 def tally_contributions_last_layer(sentence):
-    inputs = tokenizer([sentence], return_tensors="pt", truncation=True)
+    inputs = tokenizer([sentence], return_tensors="pt", truncation=True, return_offset_mapings=True)
+    offset_mapping = inputs['offset_mapping'].squeeze(0)
+    del inputs['offset_mapping']
     attested, keywords = run_bert_model(model, **inputs, output_hidden_states=True)
     target = attested.last_hidden_state.squeeze(0)
     layer = get_factors_last_layer(keywords)
@@ -957,6 +963,8 @@ def tally_contributions_last_layer(sentence):
         {
             'tok':tokenizer.decode(inputs.input_ids[0,tokpos]),
             'pos': tokpos,
+            'start_idx':offset_mapping[tokpos][0].item(),
+            'end_idx':offset_mapping[tokpos][1].item(),
             'ipt': relative_dot_product(target[tokpos], layer['ipt'][tokpos]),
             'norm': relative_dot_product(target[tokpos], layer['norm'][tokpos]),
             'ff': relative_dot_product(target[tokpos], layer['ff'][tokpos]),
@@ -965,6 +973,30 @@ def tally_contributions_last_layer(sentence):
         for tokpos in range(target.size(0))
     ]
     return all_contribs
+
+@torch.no_grad()
+def read_factors_last_layer(sentence):
+    inputs = tokenizer([sentence], return_tensors="pt", truncation=True, return_offsets_mapping=True)
+    offset_mapping = inputs['offset_mapping'].squeeze(0)
+    del inputs['offset_mapping']
+    attested, keywords = run_bert_model(model, **inputs, output_hidden_states=True)
+    target = attested.last_hidden_state.squeeze(0)
+    layer = get_factors_last_layer(keywords)
+    all_factors = [
+        {
+            'tok':tokenizer.decode(inputs.input_ids[0,tokpos]),
+            'pos': tokpos,
+            'start_idx':offset_mapping[tokpos][0].item(),
+            'end_idx':offset_mapping[tokpos][1].item(),
+            'ipt': layer['ipt'][tokpos],
+            'norm': layer['norm'][tokpos],
+            'ff': layer['ff'][tokpos],
+            'mha': layer['mha'][tokpos],
+        }
+        for tokpos in range(target.size(0))
+    ]
+    return all_factors
+
 
 @torch.no_grad()
 def tally_ipt_contrib_accross_layers(sentence):
@@ -1082,23 +1114,24 @@ def do_get_factors(sentence):
 #         pickle.dump(factor_group, pickle_file)
 
 def do_tally(sentence):
-    inputs = tokenizer([sentence], return_tensors="pt", truncation=True)
-    attested, keywords = run_bert_model(model, **inputs, output_hidden_states=True)
-    return None
+    return tally_contributions_last_layer(sentence)
+    # inputs = tokenizer([sentence], return_tensors="pt", truncation=True)
+    # attested, keywords = run_bert_model(model, **inputs, output_hidden_states=True)
+    # return None
     # return tally_contributions_coarse_mha(sentence, pickle_file)
+if __name__ == "__main__":
+    ipt, norm, mha, ff = [], [], [], []
+    calls = map(do_tally, data)
+    calls = tqdm.tqdm(calls, total=len(data))
+    for contribs in calls:
+        pass
+        # for token in range(len(contribs[0])):
+        #     ipt.append([layer[token]['ipt'] for layer in contribs])
+        #     norm.append([layer[token]['norm'] for layer in contribs])
+        #     mha.append([layer[token]['mha'] for layer in contribs])
+        #     ff.append([layer[token]['ff'] for layer in contribs])
 
-ipt, norm, mha, ff = [], [], [], []
-calls = map(do_tally, data)
-calls = tqdm.tqdm(calls, total=len(data))
-for contribs in calls:
-    pass
-    # for token in range(len(contribs[0])):
-    #     ipt.append([layer[token]['ipt'] for layer in contribs])
-    #     norm.append([layer[token]['norm'] for layer in contribs])
-    #     mha.append([layer[token]['mha'] for layer in contribs])
-    #     ff.append([layer[token]['ff'] for layer in contribs])
-
-pickle_file.close()
+    # pickle_file.close()
 #
 # ipt, norm, mha, ff = map(np.array, (ipt, norm, mha, ff))
 #
