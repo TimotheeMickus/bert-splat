@@ -15,7 +15,7 @@ import tqdm
 
 from linear_structure import model, read_factors_last_layer
 
-DROP_MONOSEMOUS = False
+DROP_MONOSEMOUS = True
 
 def build_refs():
     """build references for easier computations: dict {lemma -> [tags]}"""
@@ -96,7 +96,7 @@ def parse_semcor():
     all_items = []
     was_grad_enabled = torch.is_grad_enabled()
     torch.set_grad_enabled(False)
-    for sentence in tqdm.tqdm(semcor.tagged_sents(tag='sem')):
+    for sentence in tqdm.tqdm(semcor.tagged_sents(tag='sem'), desc='Parsing SemCor'):
         sentence_tokens = [
             word
             for subtree in sentence
@@ -133,8 +133,12 @@ def parse_semcor():
             for tagged_item in tagged
         ]
         if DROP_MONOSEMOUS:
-            zipped_tagged_items = zip(lemmas_tagged, tagged, true_tags)
-            lemmas_tagged, tagged, true_tags = zip(*filter(lambda t: t[0] in refs, zipped_tagged_items))
+            zipped_tagged_items = list(zip(lemmas_tagged, tagged, true_tags))
+            try:
+                lemmas_tagged, tagged, true_tags = zip(*filter(lambda t: t[0] in refs, zipped_tagged_items))
+            except ValueError as ve:
+                assert ve.args[0] == 'not enough values to unpack (expected 3, got 0)'
+                lemmas_tagged, tagged, true_tags = [], [], []
         if len(tagged) == 0:
             continue
         embedded_toks = read_factors_last_layer(sentence_str)
@@ -202,14 +206,22 @@ class BertFactorSemcorDataset(Dataset):
     def __len__(self):
         return len(self.items)
 
-def get_dataloaders(cache_dir=pathlib.Path('data'), batch_size=256):
+CACHE_DIR = pathlib.Path('data')
+if DROP_MONOSEMOUS:
+    CACHE_DIR = CACHE_DIR / 'drop'
+else:
+    CACHE_DIR = CACHE_DIR / 'no-drop'
+
+def get_dataloaders(cache_dir=CACHE_DIR, batch_size=100):
     """get (or build) Datasets, then convert them to DataLoader"""
     try:
         train_dataset = BertFactorSemcorDataset.load(cache_dir / 'train.pt')
         dev_dataset = BertFactorSemcorDataset.load(cache_dir / 'dev.pt')
         test_dataset = BertFactorSemcorDataset.load(cache_dir / 'test.pt')
+        print(f'Using cached dataset files at {cache_dir}.')
     except FileNotFoundError:
-        cache_dir.mkdir(exists_ok=True, parents=True)
+        print('Dataset files not cached, splitting from scratch.')
+        cache_dir.mkdir(exist_ok=True, parents=True)
         train_dataset, dev_dataset, test_dataset = BertFactorSemcorDataset.splits()
         train_dataset.save(cache_dir / 'train.pt')
         dev_dataset.save(cache_dir / 'dev.pt')
