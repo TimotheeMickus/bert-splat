@@ -3,6 +3,7 @@ import itertools
 import functools
 import json
 import math
+import multiprocessing as mp
 import pathlib
 import pprint
 import random
@@ -253,45 +254,56 @@ def powerset():
 
 all_results = {}
 
-for K in range(1, 11):
-    all_results[K] = {}
-    for keys_to_sum in powerset():
-        jkey = "+".join(keys_to_sum)
-        all_results[K][jkey] = {}
-        tqdm.tqdm.write("Using as input: " + " + ".join(keys_to_sum))
-        train, dev, test = get_dataloaders(batch_size=1)
-        neighborhood_by_lemma = collections.defaultdict(list)
-        for item in train.dataset:
-            rep = sum(item[key] for key in keys_to_sum)
-            neighborhood_by_lemma[item['lemma']].append([item['tag'], rep])
-        for method in "cos", "euc":
-            all_results[K][jkey][method] = {}
-            pbar = tqdm.tqdm(dev.dataset, desc="Val.", leave=False, disable=None)
-            all_preds = []
-            running_acc, total_items = 0, 0
-            for item in pbar:
-                tested_item = sum(item[key].to(DEVICE) for key in keys_to_sum)
-                if method == 'cos':
-                    def distance(other_item):
-                        return 1. - F.cosine_similarity(tested_item, other_item[1], dim=0).item()
-                else:
-                    def distance(other_item):
-                        return torch.dist(tested_item, other_item[1]).item()
-                neighborhood = sorted(neighborhood_by_lemma[item['lemma']], key=distance)[:K]
-                neighborhood = [tag for tag, emb in neighborhood]
-                try:
-                    pred = collections.Counter(neighborhood).most_common(1)[0]
-                except IndexError:
-                    # not in train set
-                    pred = None, None
-                total_items += 1
-                running_acc += pred[0] == item['tag']
-                all_preds.append((pred[0], item['tag']))
-                pbar.set_description(f"Valid (A={running_acc/total_items:.4f})")
-                unk_removed = [p[0] == p[1] for p in all_preds if p[0] is not None]
-            print(f'Accuracy ({method}):', running_acc/total_items, 'unk removed:', sum(unk_removed)/len(unk_removed))
-            all_results[K][jkey][method]['preds'] = all_preds
-            all_results[K][jkey][method]['results'] = {'raw': running_acc/total_items, 'no-unk': sum(unk_removed)/len(unk_removed)}
+train, dev, test = get_dataloaders(batch_size=1)
 
-with open(f'semcor-knn-devresults.json', 'w') as ostr:
-    json.dump(all_results, ostr)
+def run_one_conf(conf, dev=dev, train=train):
+    K, keys_to_sum, method = conf
+    neighborhood_by_lemma = collections.defaultdict(list)
+    for item in train.dataset:
+        rep = sum(item[key] for key in keys_to_sum)
+        neighborhood_by_lemma[item['lemma']].append([item['tag'], rep])
+    pbar_pos = int(mp.current_process().name.split('-')[1])
+    pbar = tqdm.tqdm(dev.dataset, desc="Valid", leave=False, position=pbar_pos)
+    all_preds = []
+    running_acc, total_items = 0, 0
+    for item in pbar:
+        tested_item = sum(item[key].to(DEVICE) for key in keys_to_sum)
+        if method == 'cos':
+            def distance(other_item):
+                return 1. - F.cosine_similarity(tested_item, other_item[1], dim=0).item()
+        else:
+            def distance(other_item):
+                return torch.dist(tested_item, other_item[1]).item()
+        neighborhood = sorted(neighborhood_by_lemma[item['lemma']], key=distance)[:K]
+        neighborhood = [tag for tag, emb in neighborhood]
+        try:
+            pred = collections.Counter(neighborhood).most_common(1)[0]
+        except IndexError:
+            # not in train set
+            pred = None, None
+        total_items += 1
+        running_acc += pred[0] == item['tag']
+        all_preds.append((pred[0], item['tag']))
+        pbar.set_description(f"Valid (A={running_acc/total_items:.4f})")
+        unk_removed = [p[0] == p[1] for p in all_preds if p[0] is not None]
+    pbar.close()
+    return conf, all_preds, unk_removed, running_acc, total_items
+
+
+
+def yield_confs():
+    for K in range(1, 11):
+        for keys_to_sum in powerset():
+            for method in "cos", "euc":
+                yield K, keys_to_sum, method
+
+with mp.Pool(mp.cpu_count()) as pool, open(f'semcor-knn-devresults.txt', 'w') as ostr:
+    print('K', 'form', 'dist', 'all', 'no unk', sep="\t", file=ostr)
+    confs = list(yield_confs())
+    calls = pool.imap_unordered(run_one_conf, confs)
+    calls = tqdm.tqdm(calls, total=len(confs), leave=False, desc="confs.")
+    for conf, all_preds, unk_removed, running_acc, total_items in calls:
+        K, keys_to_sum, method = conf
+        jkey = "+".join(keys_to_sum)
+        tqdm.tqdm.write(f"{K}\t{jkey}\t{method}\t{running_acc/total_items}\t{sum(unk_removed)/len(unk_removed)}")
+        print(K, jkey, method, running_acc/total_items, sum(unk_removed)/len(unk_removed), sep="\t", file=ostr)

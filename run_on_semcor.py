@@ -296,11 +296,10 @@ class BestTracker():
 MODELS_DIR = pathlib.Path('models')
 MODELS_DIR.mkdir(exist_ok=True, parents=True)
 
+train, dev, test = get_dataloaders(batch_size=BATCH_SIZE)
+
 for keys_to_sum in powerset():
-
-    tqdm.tqdm.write("Using as input: " + " + ".join(keys_to_sum))
-    train, dev, test = get_dataloaders(batch_size=BATCH_SIZE)
-
+    print("Using as input: " + " + ".join(keys_to_sum))
     MODEL_NAME = MODELS_DIR / ("_".join(keys_to_sum) + '.pt')
     best_tracker = BestTracker(MODEL_NAME)
 
@@ -394,6 +393,13 @@ for keys_to_sum in powerset():
             pbar.close()
         return -max_acc
 
+    if (MODELS_DIR / ("_".join(keys_to_sum) + ".pkl")).is_file():
+        skopt_callback = None
+        previous_dump = skopt.load(MODELS_DIR / ("_".join(keys_to_sum) + ".pkl"))
+        if len(previous_dump['x_iters']) == 100:
+            print(f"This config ({'+'.join(keys_to_sum)}) is already done. Continuing...")
+            continue
+            
     skopt_pbar = tqdm.trange(100, position=2, leave=False, desc=f"BayesOpt ({'+'.join(keys_to_sum)})", disable=None)
     def skopt_callback(partial_result):
         skopt.dump(partial_result, MODELS_DIR / ("_".join(keys_to_sum) + ".pkl"), store_objective=False)
