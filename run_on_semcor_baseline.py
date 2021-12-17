@@ -1,6 +1,7 @@
 import collections
 import itertools
 import functools
+import json
 import math
 import pathlib
 import pprint
@@ -219,7 +220,7 @@ IPT_SIZE = 768
 BATCH_SIZE = 2048
 EPOCHS = 20
 KEYS_TO_SUM = 'ipt', 'norm', 'mha', 'ff'
-DEVICE = 'cuda'
+DEVICE = 'cpu'
 
 def get_dataloaders(cache_dir=CACHE_DIR, batch_size=BATCH_SIZE):
     """get (or build) Datasets, then convert them to DataLoader"""
@@ -250,156 +251,29 @@ def powerset():
     )
     yield from itertools.chain.from_iterable(combinations)
 
-@torch.no_grad()
-def get_or_compute_bert_wn_embs(cache_dir=CACHE_DIR):
+train, dev, test = get_dataloaders(batch_size=1)
+neighborhood_by_lemma = collections.defaultdict(list)
+for item in train.dataset:
+    neighborhood_by_lemma[item['lemma']].append(item['tag'])
+    # rep = sum(item[key] for key in keys_to_sum)
+pbar = tqdm.tqdm(dev.dataset, desc="Val.", leave=False, disable=None)
+all_preds = []
+running_mfs, running_rand  = 0, 0
+total_items = 0
+for item in pbar:
+    neighborhood = neighborhood_by_lemma[item['lemma']]
     try:
-        cached_bert_embs = torch.load(CACHE_DIR / 'bert_wn_defs.pt')
-        tqdm.tqdm.write('using cached BERT WN embs')
-        return cached_bert_embs
-    except FileNotFoundError:
-        tqdm.tqdm.write('computing BERT WN embs, this might take a while...')
-        wn_key_to_bert_emb = {}
-        definitions = []
-        for wn_key in tqdm.tqdm(tags_stoi.keys(), leave=False, desc="Init", disable=None):
-            try:
-                wn_def = wn.lemma_from_key(wn_key).synset().definition()
-                definitions.append([wn_key, wn_def])
-            except ValueError as ve:
-                assert ve.args[0] == 'not enough values to unpack (expected 2, got 1)'
-                # ok, whatever
-
-        tqdm.tqdm.write(f"found {len(definitions)} / {len(tags_stoi)} synsets ({len(definitions)/len(tags_stoi)*100:.2f}%)")
-        bert_batched = more_itertools.chunked(definitions, BATCH_SIZE)
-        for batch in tqdm.tqdm(bert_batched, total=math.ceil(len(definitions) / BATCH_SIZE), leave=False, desc="Init", disable=None):
-            batch_keys, batch_defs = zip(*batch)
-            inputs = linear_structure.tokenizer(list(batch_defs), return_tensors='pt', truncation=True, padding=True)
-            embs = linear_structure.model(**inputs).last_hidden_state.sum(1)
-            for wn_key, bert_emb in zip(batch_keys, embs):
-                wn_key_to_bert_emb[wn_key] = bert_emb
-        torch.save(wn_key_to_bert_emb, CACHE_DIR / 'bert_wn_defs.pt')
-        return wn_key_to_bert_emb
-
-torch.set_grad_enabled(True)
-
-class BestTracker():
-    def __init__(self, model_name):
-        self.best = -float('inf')
-        self.model_name = model_name
-
-    def try_dump(self, model, acc):
-        if acc > self.best:
-            tqdm.tqdm.write('dumping best model')
-            torch.save(model, self.model_name)
-            self.best = acc
-
-
-MODELS_DIR = pathlib.Path('models')
-MODELS_DIR.mkdir(exist_ok=True, parents=True)
-
-for keys_to_sum in powerset():
-
-    tqdm.tqdm.write("Using as input: " + " + ".join(keys_to_sum))
-    train, dev, test = get_dataloaders(batch_size=BATCH_SIZE)
-
-    MODEL_NAME = MODELS_DIR / ("_".join(keys_to_sum) + '.pt')
-    best_tracker = BestTracker(MODEL_NAME)
-
-    tqdm.tqdm.write("data:\n"+
-        f"\ttrain: {len(train.dataset)}\n"+
-        f"\tdev: {len(dev.dataset)}\n"+
-        f"\ttest: {len(test.dataset)}")
-    # this model is cheap enough to run on CPU in a decent amount of time
-    search_space = [
-        skopt.space.Real(0., .5, "uniform", name="dropout_p"),
-        skopt.space.Real(1.e-5, 1.0, "log-uniform", name="lr"),
-        skopt.space.Real(.9, 1. - 1.e-3, "log-uniform", name="beta_a"),
-        skopt.space.Real(.9, 1. - 1.e-3, "log-uniform", name="beta_b"),
-        skopt.space.Real(0., 1., "uniform", name="weight_decay"),
-        # skopt.space.Categorical([True, False], name="init_wn"),
-        skopt.space.Categorical([True, False], name="use_scheduler"),
-    ]
-
-    @skopt.utils.use_named_args(search_space)
-    def fit(**hparams):
-        tqdm.tqdm.write("current fit:\n" + pprint.pformat(hparams))
-        wsd_model = nn.Sequential(
-            nn.Linear(IPT_SIZE, IPT_SIZE),
-            nn.ReLU(),
-            nn.Dropout(hparams['dropout_p']),
-            nn.Linear(IPT_SIZE, len(tags_stoi), bias=False)
-        ).to(DEVICE)
-
-        @torch.no_grad()
-        def init_output_embs_from_wn_():
-            wn_views = get_or_compute_bert_wn_embs()
-            pbar = tqdm.tqdm(wn_views.items(), total=len(wn_views), leave=False, desc="Init", disable=None)
-            for wn_key, bert_emb in pbar:
-                idx = tags_stoi[wn_key]
-                wsd_model[-1].weight[idx,:] = bert_emb.to(DEVICE)
-                # wsd_model[-1].bias[:] = 0
-            torch.nn.init.eye_(wsd_model[0].weight)
-            torch.nn.init.zeros_(wsd_model[0].bias)
-
-        # if hparams['init_wn']:
-        #     init_output_embs_from_wn_()
-
-        tqdm.tqdm.write("model:\n" + str(wsd_model))
-        max_acc = -float('inf')
-        optimizer = optim.Adam(wsd_model.parameters(), betas=sorted([hparams["beta_a"], hparams["beta_b"]]), lr=hparams["lr"], weight_decay=hparams["weight_decay"])
-        criterion = nn.CrossEntropyLoss()
-        if hparams['use_scheduler']:
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, threshold=0.005)
-        for epoch in tqdm.trange(EPOCHS, desc="Epochs", leave=False, disable=None):
-            pbar = tqdm.tqdm(train, desc="Train", leave=False, disable=None)
-            wsd_model.train()
-            losses = collections.deque(maxlen=100)
-            accs = collections.deque(maxlen=100)
-            for batch in pbar:
-                optimizer.zero_grad()
-                with torch.no_grad():
-                    all_ipts = sum(batch[key].to(DEVICE) for key in keys_to_sum)
-                mlp_output = wsd_model(all_ipts)
-                tgt = batch['tgt_idx'].view(-1).to(DEVICE)
-                # using a mask means we can use the same matrix for all preds, and zero out irrelevant items
-                lemma_specific_output = mlp_output.masked_fill(batch['lemma_mask'].to(DEVICE), -float('inf'))
-                loss = criterion(lemma_specific_output, tgt)
-                acc = (F.softmax(lemma_specific_output, dim=-1).argmax(dim=-1) ==  tgt).float().mean()
-                loss.backward()
-                optimizer.step()
-                losses.append(loss.item())
-                accs.append(acc.item())
-                pbar.set_description(f"Train (L={sum(losses)/len(losses):.4f}, A={sum(accs)/len(accs):.4f})")
-            pbar.close()
-            pbar = tqdm.tqdm(dev, desc="Val.", leave=False, disable=None)
-            wsd_model.eval()
-            running_loss, total_items = 0, 0
-            total_acc = 0
-            with torch.no_grad():
-                for batch in pbar:
-                    all_ipts = sum(batch[key].to(DEVICE) for key in keys_to_sum)
-                    mlp_output = wsd_model(all_ipts)
-                    tgt = batch['tgt_idx'].view(-1).to(DEVICE)
-                    lemma_specific_output = mlp_output.masked_fill(batch['lemma_mask'].to(DEVICE), -float('inf'))
-                    loss = F.cross_entropy(lemma_specific_output, tgt, reduction='sum')
-                    acc = (F.softmax(lemma_specific_output, dim=-1).argmax(dim=-1) == tgt).sum()
-                    running_loss += loss.item()
-                    total_acc += acc.item()
-                    total_items += batch['tgt_idx'].numel()
-                    pbar.set_description(f"Valid (L={running_loss/total_items:.4f}, A={total_acc/total_items:.4f})")
-            tqdm.tqdm.write(f"Epoch {epoch}, loss: {running_loss/total_items}, acc.: {total_acc/total_items}")
-            max_acc = max(max_acc, total_acc/total_items)
-            best_tracker.try_dump(wsd_model, total_acc/total_items)
-            if hparams['use_scheduler']:
-                scheduler.step(running_loss/total_items)
-            pbar.close()
-        return -max_acc
-
-    skopt_pbar = tqdm.trange(100, position=2, leave=False, desc=f"BayesOpt ({'+'.join(keys_to_sum)})", disable=None)
-    def skopt_callback(partial_result):
-        skopt.dump(partial_result, MODELS_DIR / ("_".join(keys_to_sum) + ".pkl"), store_objective=False)
-        skopt_pbar.update()
-
-    full_result = skopt.gp_minimize(fit, search_space, n_calls=100, n_initial_points=10, callback=skopt_callback)
-    skopt_pbar.close()
-    with open('semcor-devresults.txt', 'a') as ostr:
-        print('+'.join(keys_to_sum), best_tracker.best, file=ostr)
+        pred_mfs = collections.Counter(neighborhood).most_common(1)[0]
+        pred_rand = 1 / len(set(neighborhood))
+    except IndexError:
+        # not in train set
+        pred_mfs = None, None
+        pred_rand = 0
+    total_items += 1
+    running_mfs += pred_mfs[0] == item['tag']
+    running_rand += pred_rand
+    all_preds.append((pred_mfs[0], item['tag']))
+    pbar.set_description(f"Valid (A={running_mfs/total_items:.4f})")
+unk_removed = [p[0] == p[1] for p in all_preds if p[0] is not None]
+print(f'MFS Accuracy:', running_mfs/total_items, 'unk removed:', sum(unk_removed)/len(unk_removed))
+print(f'Rand Accuracy:', running_rand/total_items, 'unk removed:', running_rand/len(unk_removed))
