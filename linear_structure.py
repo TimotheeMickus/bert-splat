@@ -17,7 +17,9 @@ from transformers.modeling_outputs import (
     TokenClassifierOutput,
 )
 
-MODEL_NAME = "bert-base-uncased"
+# MODEL_NAME = "bert-base-uncased"
+MODEL_NAME = "dslim/bert-base-NER-uncased"
+# MODEL_NAME = "twmkn9/bert-base-uncased-squad2"
 
 model = AutoModel.from_pretrained(MODEL_NAME)
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -953,7 +955,7 @@ def get_factors_last_layer(keywords, up_to_layer=12):
 
 @torch.no_grad()
 def tally_contributions_last_layer(sentence):
-    inputs = tokenizer([sentence], return_tensors="pt", truncation=True, return_offset_mapings=True)
+    inputs = tokenizer([sentence], return_tensors="pt", truncation=True, return_offsets_mapping=True)
     offset_mapping = inputs['offset_mapping'].squeeze(0)
     del inputs['offset_mapping']
     attested, keywords = run_bert_model(model, **inputs, output_hidden_states=True)
@@ -975,11 +977,11 @@ def tally_contributions_last_layer(sentence):
     return all_contribs
 
 @torch.no_grad()
-def read_factors_last_layer(sentence):
-    inputs = tokenizer([sentence], return_tensors="pt", truncation=True, return_offsets_mapping=True)
+def read_factors_last_layer(sentence, model_=model, tokenizer_=tokenizer):
+    inputs = tokenizer_([sentence], return_tensors="pt", truncation=True, return_offsets_mapping=True)
     offset_mapping = inputs['offset_mapping'].squeeze(0)
     del inputs['offset_mapping']
-    attested, keywords = run_bert_model(model, **inputs, output_hidden_states=True)
+    attested, keywords = run_bert_model(model_, **inputs, output_hidden_states=True)
     target = attested.last_hidden_state.squeeze(0)
     layer = get_factors_last_layer(keywords)
     all_factors = [
@@ -1119,12 +1121,103 @@ def do_tally(sentence):
     # attested, keywords = run_bert_model(model, **inputs, output_hidden_states=True)
     # return None
     # return tally_contributions_coarse_mha(sentence, pickle_file)
-if __name__ == "__main__":
+
+MODE = "prop-across-layers"
+# MODE = "last-layer-mlm-perf"
+
+import joblib
+
+if __name__ == "__main__" and MODE == 'prop-across-layers':
+    print(MODE)
+    def do_tally(sentence):
+        return tally_contributions_coarse_mha(sentence)
     ipt, norm, mha, ff = [], [], [], []
     calls = map(do_tally, data)
-    calls = tqdm.tqdm(calls, total=len(data))
-    for contribs in calls:
-        pass
+    for contribs in tqdm.tqdm(calls, total=len(data)):
+        for token in range(len(contribs[0])):
+            ipt.append([layer[token]['ipt'] for layer in contribs])
+            norm.append([layer[token]['norm'] for layer in contribs])
+            mha.append([layer[token]['mha'] for layer in contribs])
+            ff.append([layer[token]['ff'] for layer in contribs])
+    ipt, norm, mha, ff = map(np.array, (ipt, norm, mha, ff))
+    for layer_idx in range(ipt.shape[1]):
+        print(f"layer {layer_idx}:")
+        print(f"\tipt: {ipt[:,layer_idx].mean()} +- {ipt[:,layer_idx].std()}")
+        print(f"\tnorm: {norm[:,layer_idx].mean()} +- {norm[:,layer_idx].std()}")
+        print(f"\tff: {ff[:,layer_idx].mean()} +- {ff[:,layer_idx].std()}")
+        print(f"\tmha: {mha[:,layer_idx].mean()} +- {mha[:,layer_idx].std()}")
+    model_id = MODEL_NAME.split('/')[-1]
+    joblib.dump(ipt, f"ipt_{model_id}.npy")
+    joblib.dump(norm, f"norm_{model_id}.npy")
+    joblib.dump(mha, f"mha_{model_id}.npy")
+    joblib.dump(ff, f"ff_{model_id}.npy")
+
+
+if __name__ == '__main__' and MODE == 'last-layer-mlm-perf':
+    print(MODE)
+    torch.set_grad_enabled(False)
+    import itertools
+
+    KEYS_TO_SUM = 'ipt', 'mha', 'norm', 'ff'
+
+    def powerset():
+        combinations = (
+            itertools.combinations(KEYS_TO_SUM, r)
+            for r in range(1, len(KEYS_TO_SUM) + 1)
+        )
+        yield from itertools.chain.from_iterable(combinations)
+
+    from transformers import AutoModelWithLMHead
+    model_lm = AutoModelWithLMHead.from_pretrained(MODEL_NAME)
+    model_lm.eval()
+    first_true_idx = max(v for k,v in tokenizer.vocab.items() if k.startswith('[unused')) + 1
+
+    def mask_me(inputs):
+        rd_sample = torch.rand(inputs.input_ids.size())
+        sampled_mask = rd_sample <= 0.15
+        target_ids = inputs.input_ids
+        random_wordpiece = torch.randint(first_true_idx, tokenizer.vocab_size, inputs.input_ids.size())
+        inputs['input_ids'] = inputs['input_ids'].masked_fill(rd_sample <= 0.135, 0) + random_wordpiece.masked_fill(rd_sample > 0.135, 0)
+        inputs['input_ids'] = inputs['input_ids'].masked_fill(rd_sample <= 0.12, tokenizer.mask_token_id).detach()
+        return target_ids, sampled_mask, inputs
+
+    def pred_lm(inputs):
+        _, keywords = run_bert_model(model_lm.bert, **inputs)
+        factors = get_factors_last_layer(keywords)
+        pred_from = lambda *keys: model_lm.cls(sum(factors[k] for k in keys).unsqueeze(0))
+        return {keys: pred_from(*keys) for keys in powerset()}
+
+    n_items = 0
+    import collections, tqdm
+    import torch.nn.functional as F
+
+    running_accs = collections.defaultdict(int)
+    running_kldivs = collections.defaultdict(int)
+    relevant_keys = set(powerset())
+    for sentence in tqdm.tqdm(data):
+        inputs = tokenizer([sentence], return_tensors="pt", truncation=True)
+        target_ids, sampled_mask, inputs = mask_me(inputs)
+        targets_only = target_ids.masked_select(sampled_mask)
+        dict_obs = pred_lm(inputs)
+        n_items += targets_only.numel()
+        for k in relevant_keys:
+            # running_accs[k] += (dict_obs[k].argmax(-1).view(-1) == inputs.input_ids.view(-1)).sum().item()
+            running_accs[k] += (dict_obs[k].argmax(-1).masked_select(sampled_mask) == targets_only).sum().item()
+            # running_kldivs[k] += F.cross_entropy(dict_obs[k].squeeze(0), inputs.input_ids.view(-1), reduction='sum').item()
+            reps_for_targets = dict_obs[k].masked_select(sampled_mask.unsqueeze(-1)).view(targets_only.numel(), dict_obs[k].size(-1))
+            running_kldivs[k] += F.cross_entropy(reps_for_targets, targets_only, reduction='sum').item()
+    print("\nraw accs")
+    for k in running_accs:
+        print(f"{'+'.join(k)}\t{running_accs[k] / n_items}")
+    print("\nXent")
+    for k in sorted(running_kldivs):
+        print(f"{'+'.join(k)}\t{running_kldivs[k] / n_items}")
+# if __name__ == "__main__":
+#     ipt, norm, mha, ff = [], [], [], []
+#     calls = map(do_tally, data
+#     calls = tqdm.tqdm(calls, total=len(data))
+#     for contribs in calls:
+#         pass
         # for token in range(len(contribs[0])):
         #     ipt.append([layer[token]['ipt'] for layer in contribs])
         #     norm.append([layer[token]['norm'] for layer in contribs])

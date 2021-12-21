@@ -6,17 +6,19 @@ import pathlib
 import pprint
 import random
 import re
-import skopt
 
 import more_itertools
 from nltk.corpus import semcor
 from nltk.corpus import wordnet as wn
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
 from torch import optim
 from torch.utils.data import DataLoader, Dataset
 import tqdm
+import sklearn.metrics
+import skopt
 
 import linear_structure
 
@@ -399,7 +401,7 @@ for keys_to_sum in powerset():
         if len(previous_dump['x_iters']) == 100:
             print(f"This config ({'+'.join(keys_to_sum)}) is already done. Continuing...")
             continue
-            
+
     skopt_pbar = tqdm.trange(100, position=2, leave=False, desc=f"BayesOpt ({'+'.join(keys_to_sum)})", disable=None)
     def skopt_callback(partial_result):
         skopt.dump(partial_result, MODELS_DIR / ("_".join(keys_to_sum) + ".pkl"), store_objective=False)
@@ -409,3 +411,48 @@ for keys_to_sum in powerset():
     skopt_pbar.close()
     with open('semcor-devresults.txt', 'a') as ostr:
         print('+'.join(keys_to_sum), best_tracker.best, file=ostr)
+
+DEVICE = 'cpu'
+
+all_preds = {}
+with open('semcor-testresults.txt', 'w') as ostr:
+    for keys_to_sum in powerset():
+        wsd_model = torch.load(MODELS_DIR / ("_".join(keys_to_sum) + '.pt'), map_location=torch.device(DEVICE))
+        pbar = tqdm.tqdm(test, desc="Test", leave=False, disable=None)
+        wsd_model.eval()
+        running_loss, total_items = 0, 0
+        total_acc = 0
+        all_preds[keys_to_sum] = []
+        all_targets = []
+        with torch.no_grad():
+            for batch in pbar:
+                all_ipts = sum(batch[key].to(DEVICE) for key in keys_to_sum)
+                mlp_output = wsd_model(all_ipts)
+                tgt = batch['tgt_idx'].view(-1).to(DEVICE)
+                all_targets.extend(tgt.tolist())
+                lemma_specific_output = mlp_output.masked_fill(batch['lemma_mask'].to(DEVICE), -float('inf'))
+                loss = F.cross_entropy(lemma_specific_output, tgt, reduction='sum')
+                lemma_preds = F.softmax(lemma_specific_output, dim=-1).argmax(dim=-1).view(-1)
+                all_preds[keys_to_sum].extend(lemma_preds.detach().tolist())
+                acc = (lemma_preds == tgt).sum()
+                running_loss += loss.item()
+                total_acc += acc.item()
+                total_items += batch['tgt_idx'].numel()
+                pbar.set_description(f"Valid (L={running_loss/total_items:.4f}, A={total_acc/total_items:.4f})")
+        tqdm.tqdm.write(f"Model {'+'.join(keys_to_sum)}, loss: {running_loss/total_items}, acc.: {total_acc/total_items}, f1 (macro): {sklearn.metrics.f1_score(all_targets, all_preds[keys_to_sum], average='macro')}, f1 (micro): {sklearn.metrics.f1_score(all_targets, all_preds[keys_to_sum], average='micro')}")
+    print('+'.join(keys_to_sum), total_acc/total_items, file=ostr)
+
+import numpy as np
+# compat with paper for figures
+keys_in_order = [
+    ('ipt',), ('mha',), ('ff',), ('norm',),
+    ('ipt', 'mha'), ('ipt', 'ff'), ('ipt', 'norm'), ('mha', 'ff'), ('norm', 'mha'), ('norm', 'ff'),
+    ('ipt', 'mha', 'ff'), ('ipt', 'norm', 'mha'),  ('ipt', 'norm', 'ff'), ('norm', 'mha', 'ff'),
+    ('ipt', 'norm', 'mha', 'ff')
+]
+matrix_view = np.zeros((len(all_preds), len(all_preds)))
+for i, keys_1 in enumerate(keys_in_order):
+    for j, keys_2 in enumerate(keys_in_order):
+        matrix_view[i, j] = sklearn.metrics.f1_score(all_preds[keys_1], all_preds[keys_2], average='micro')
+# print(matrix_view.tolist())
+np.save('f1-classif-semcor.npy', matrix_view)

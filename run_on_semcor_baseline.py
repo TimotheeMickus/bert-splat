@@ -275,5 +275,27 @@ for item in pbar:
     all_preds.append((pred_mfs[0], item['tag']))
     pbar.set_description(f"Valid (A={running_mfs/total_items:.4f})")
 unk_removed = [p[0] == p[1] for p in all_preds if p[0] is not None]
-print(f'MFS Accuracy:', running_mfs/total_items, 'unk removed:', sum(unk_removed)/len(unk_removed))
-print(f'Rand Accuracy:', running_rand/total_items, 'unk removed:', running_rand/len(unk_removed))
+print(f'MFS Accuracy (dev):', running_mfs/total_items, 'unk removed:', sum(unk_removed)/len(unk_removed))
+print(f'Rand Accuracy (dev):', running_rand/total_items, 'unk removed:', running_rand/len(unk_removed))
+
+pbar = tqdm.tqdm(test.dataset, desc="Val.", leave=False, disable=None)
+all_preds = []
+running_mfs, running_rand  = 0, 0
+total_items = 0
+for item in pbar:
+    neighborhood = neighborhood_by_lemma[item['lemma']]
+    try:
+        pred_mfs = collections.Counter(neighborhood).most_common(1)[0]
+        pred_rand = 1 / len(set(neighborhood))
+    except IndexError:
+        # not in train set
+        pred_mfs = None, None
+        pred_rand = 0
+    total_items += 1
+    running_mfs += pred_mfs[0] == item['tag']
+    running_rand += pred_rand
+    all_preds.append((pred_mfs[0], item['tag']))
+    pbar.set_description(f"Valid (A={running_mfs/total_items:.4f})")
+unk_removed = [p[0] == p[1] for p in all_preds if p[0] is not None]
+print(f'MFS Accuracy (test):', running_mfs/total_items, 'unk removed:', sum(unk_removed)/len(unk_removed))
+print(f'Rand Accuracy (test):', running_rand/total_items, 'unk removed:', running_rand/len(unk_removed))

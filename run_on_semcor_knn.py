@@ -19,6 +19,7 @@ import torch.nn.functional as F
 from torch import optim
 from torch.utils.data import DataLoader, Dataset
 import tqdm
+import sklearn.metrics
 
 import linear_structure
 
@@ -256,14 +257,14 @@ all_results = {}
 
 train, dev, test = get_dataloaders(batch_size=1)
 
-def run_one_conf(conf, dev=dev, train=train):
+def run_one_conf(conf, test=test, train=train):
     K, keys_to_sum, method = conf
     neighborhood_by_lemma = collections.defaultdict(list)
     for item in train.dataset:
         rep = sum(item[key] for key in keys_to_sum)
         neighborhood_by_lemma[item['lemma']].append([item['tag'], rep])
     pbar_pos = int(mp.current_process().name.split('-')[1])
-    pbar = tqdm.tqdm(dev.dataset, desc="Valid", leave=False, position=pbar_pos)
+    pbar = tqdm.tqdm(test.dataset, desc="Valid", leave=False, position=pbar_pos)
     all_preds = []
     running_acc, total_items = 0, 0
     for item in pbar:
@@ -292,18 +293,38 @@ def run_one_conf(conf, dev=dev, train=train):
 
 
 def yield_confs():
-    for K in range(1, 11):
+    for K in [5]:
         for keys_to_sum in powerset():
-            for method in "cos", "euc":
+            for method in ("cos",):
                 yield K, keys_to_sum, method
 
-with mp.Pool(mp.cpu_count()) as pool, open(f'semcor-knn-devresults.txt', 'w') as ostr:
+tags_to_index = collections.defaultdict(itertools.count().__next__)
+with mp.Pool(mp.cpu_count() - 1) as pool, open(f'semcor-knn-testresults.txt', 'w') as ostr:
     print('K', 'form', 'dist', 'all', 'no unk', sep="\t", file=ostr)
     confs = list(yield_confs())
     calls = pool.imap_unordered(run_one_conf, confs)
     calls = tqdm.tqdm(calls, total=len(confs), leave=False, desc="confs.")
-    for conf, all_preds, unk_removed, running_acc, total_items in calls:
+    all_preds = {}
+    for conf, all_preds_, unk_removed, running_acc, total_items in calls:
         K, keys_to_sum, method = conf
+        all_preds[keys_to_sum] = [tags_to_index[p[0]] for p in all_preds_ if p[0] is not None]
         jkey = "+".join(keys_to_sum)
         tqdm.tqdm.write(f"{K}\t{jkey}\t{method}\t{running_acc/total_items}\t{sum(unk_removed)/len(unk_removed)}")
         print(K, jkey, method, running_acc/total_items, sum(unk_removed)/len(unk_removed), sep="\t", file=ostr)
+
+
+import numpy as np
+# compat with paper for figures
+keys_in_order = [
+    ('ipt',), ('mha',), ('ff',), ('norm',),
+    ('ipt', 'mha'), ('ipt', 'ff'), ('ipt', 'norm'), ('mha', 'ff'), ('norm', 'mha'), ('norm', 'ff'),
+    ('ipt', 'mha', 'ff'), ('ipt', 'norm', 'mha'),  ('ipt', 'norm', 'ff'), ('norm', 'mha', 'ff'),
+    ('ipt', 'norm', 'mha', 'ff')
+]
+matrix_view = np.zeros((len(all_preds), len(all_preds)))
+
+for i, keys_1 in enumerate(keys_in_order):
+    for j, keys_2 in enumerate(keys_in_order):
+        matrix_view[i, j] = sklearn.metrics.f1_score(all_preds[keys_1], all_preds[keys_2], average='micro')
+# print(matrix_view.tolist())
+np.save('f1-knn5-semcor.npy', matrix_view)
