@@ -17,8 +17,8 @@ from transformers.modeling_outputs import (
     TokenClassifierOutput,
 )
 
-# MODEL_NAME = "bert-base-uncased"
-MODEL_NAME = "dslim/bert-base-NER-uncased"
+MODEL_NAME = "bert-base-uncased"
+# MODEL_NAME = "dslim/bert-base-NER-uncased"
 # MODEL_NAME = "twmkn9/bert-base-uncased-squad2"
 
 model = AutoModel.from_pretrained(MODEL_NAME)

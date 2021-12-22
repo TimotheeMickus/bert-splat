@@ -114,17 +114,21 @@ search_space = [
     skopt.space.Real(.9, 1. - 1.e-3, "log-uniform", name="beta_a"),
     skopt.space.Real(.9, 1. - 1.e-3, "log-uniform", name="beta_b"),
     skopt.space.Real(0., 1., "uniform", name="weight_decay"),
+    skopt.space.Real(0., .5, "uniform", name="dropout_p"),
 ]
 
 run = 1
+train, dev, test = get_dataloaders(run)
 
 for keys in tqdm.tqdm(list(powerset()), desc='terms'):
     tracker = Tracker()
-    train, dev, test = get_dataloaders(run)
     @skopt.utils.use_named_args(search_space)
     def fit(**hparams):
         tqdm.tqdm.write(f'fit with: {pprint.pformat(hparams)}')
-        torch_model = nn.Linear(768, linear_structure.tokenizer.vocab_size).to('cuda')
+        torch_model = nn.Sequential(
+            nn.Dropout(hparams['dropout_p']),
+            nn.Linear(768, linear_structure.tokenizer.vocab_size)
+        ).to('cuda')
         optimizer = optim.AdamW(
             torch_model.parameters(),
             lr=hparams['lr'],
@@ -168,7 +172,8 @@ for keys in tqdm.tqdm(list(powerset()), desc='terms'):
                     torch.save(torch_model, MODELS_DIR / ('+'.join(keys) + f'.run-{run}.pt'))
         return -best_acc
 
-    skopt_pbar = tqdm.trange(100, position=1, leave=False, desc=f"BayesOpt ({'+'.join(keys)})", disable=None)
+    skopt_pbar = tqdm.trange(50, position=1, leave=False, desc=f"BayesOpt ({'+'.join(keys)})", disable=None)
     def skopt_callback(partial_result):
         skopt_pbar.update()
-    skopt.gp_minimize(fit, search_space, n_calls=100, n_initial_points=10, callback=skopt_callback)
+    skopt.gp_minimize(fit, search_space, n_calls=50, n_initial_points=10, callback=skopt_callback)
+    skopt_pbar.close()
