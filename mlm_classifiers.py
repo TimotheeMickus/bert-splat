@@ -86,7 +86,7 @@ import joblib
 import torch
 
 BATCH_SIZE = 2048
-def get_dataloaders(run):
+def get_dataloaders(run=1):
     try:
         train = MLMDataset.load(f'data/mlm-dataset-run-{run}-train.pt')
         dev = MLMDataset.load(f'data/mlm-dataset-run-{run}-dev.pt')
@@ -117,63 +117,162 @@ search_space = [
     skopt.space.Real(0., .5, "uniform", name="dropout_p"),
 ]
 
-run = 1
-train, dev, test = get_dataloaders(run)
+for run in tqdm.trange(4,6, desc="run", position=0, leave=True):
+#run = 2
+    train, dev, test = get_dataloaders()
 
-for keys in tqdm.tqdm(list(powerset()), desc='terms'):
-    tracker = Tracker()
-    @skopt.utils.use_named_args(search_space)
-    def fit(**hparams):
-        tqdm.tqdm.write(f'fit with: {pprint.pformat(hparams)}')
-        torch_model = nn.Sequential(
-            nn.Dropout(hparams['dropout_p']),
-            nn.Linear(768, linear_structure.tokenizer.vocab_size)
-        ).to('cuda')
-        optimizer = optim.AdamW(
-            torch_model.parameters(),
-            lr=hparams['lr'],
-            betas=sorted([hparams["beta_a"], hparams["beta_b"]]),
-            weight_decay=hparams['weight_decay'],
-        )
+    USE_TRUE_LM = False
+
+    from transformers import AutoModelWithLMHead
+
+    model_lm = AutoModelWithLMHead.from_pretrained(linear_structure.MODEL_NAME)
+
+    def pred_with_lm(reps):
+        return model_lm.cls(reps.unsqueeze(0)).squeeze(0)
+
+    if USE_TRUE_LM:
+        torch.set_grad_enabled(False)
         criterion = nn.CrossEntropyLoss()
-        losses = collections.deque(maxlen=100)
-        accs = collections.deque(maxlen=100)
-        best_acc = 0
-        for EPOCH in tqdm.trange(20, position=2, desc='Epochs', leave=False):
-            with torch.set_grad_enabled(True):
-                pbar = tqdm.tqdm(train, position=3, desc="Train", leave=False)
-                for batch in pbar:
-                    optimizer.zero_grad()
-                    reps = sum(batch[k].to('cuda') for k in keys).detach()
-                    raw_logits = torch_model(reps)
-                    loss = criterion(raw_logits, batch['tgt_id'].to('cuda'))
-                    loss.backward()
-                    losses.append(loss.item())
-                    optimizer.step()
-                    acc = (raw_logits.argmax(-1) == batch['tgt_id'].to('cuda')).float().mean().item()
-                    accs.append(acc)
-                    pbar.set_description(f"Train L={sum(losses)/len(losses):.4f} A={sum(accs)/len(accs):.4f}")
-            with torch.set_grad_enabled(False):
-                val_accs, val_losses = [], []
-                pbar = tqdm.tqdm(dev, position=3, desc="Val", leave=False)
-                for batch in pbar:
-                    reps = sum(batch[k].to('cuda') for k in keys).detach()
-                    raw_logits = torch_model(reps)
-                    loss = criterion(raw_logits, batch['tgt_id'].to('cuda'))
-                    val_losses.append(loss.item())
-                    acc = (raw_logits.argmax(-1) == batch['tgt_id'].to('cuda')).float().mean().item()
-                    val_accs.append(acc)
-                    pbar.set_description(f"Val L={sum(val_losses)/len(val_losses):.4f} A={sum(val_accs)/len(val_accs):.4f}")
-                tqdm.tqdm.write(f"[Run {run} epoch {EPOCH}] model `{'+'.join(keys)}`: L={sum(val_losses)/len(val_losses)} A={sum(val_accs)/len(val_accs)}")
-                if (sum(val_accs) / len(val_accs)) > tracker.best_acc:
-                    tqdm.tqdm.write('Dumping model.')
-                    tracker.best_acc = sum(val_accs) / len(val_accs)
-                    best_acc = tracker.best_acc
-                    torch.save(torch_model, MODELS_DIR / ('+'.join(keys) + f'.run-{run}.pt'))
-        return -best_acc
+        for keys in tqdm.tqdm(list(powerset()), desc="terms", leave=False):
+            val_accs, val_losses = [], []
+            pbar = tqdm.tqdm(dev, desc="Val", leave=False)
+            for batch in pbar:
+                reps = sum(batch[k] for k in keys).detach()
+                raw_logits = pred_with_lm(reps)
+                loss = criterion(raw_logits, batch['tgt_id'])
+                val_losses.append(loss.item())
+                acc = (raw_logits.argmax(-1) == batch['tgt_id']).float().mean().item()
+                val_accs.append(acc)
+                pbar.set_description(f"Val L={sum(val_losses)/len(val_losses):.4f} A={sum(val_accs)/len(val_accs):.4f}")
+            tqdm.tqdm.write(f"[LM head dev] model `{'+'.join(keys)}`: L={sum(val_losses)/len(val_losses)} A={sum(val_accs)/len(val_accs)}")
+        tqdm.tqdm.write('\n')
+        for keys in tqdm.tqdm(list(powerset()), desc="terms", leave=False):
+            val_accs, val_losses = [], []
+            pbar = tqdm.tqdm(test, desc="Test", leave=False)
+            for batch in pbar:
+                reps = sum(batch[k] for k in keys).detach()
+                raw_logits = pred_with_lm(reps)
+                loss = criterion(raw_logits, batch['tgt_id'])
+                val_losses.append(loss.item())
+                acc = (raw_logits.argmax(-1) == batch['tgt_id']).float().mean().item()
+                val_accs.append(acc)
+                pbar.set_description(f"Val L={sum(val_losses)/len(val_losses):.4f} A={sum(val_accs)/len(val_accs):.4f}")
+            tqdm.tqdm.write(f"[LM head test] model `{'+'.join(keys)}`: L={sum(val_losses)/len(val_losses)} A={sum(val_accs)/len(val_accs)}")
 
-    skopt_pbar = tqdm.trange(50, position=1, leave=False, desc=f"BayesOpt ({'+'.join(keys)})", disable=None)
-    def skopt_callback(partial_result):
-        skopt_pbar.update()
-    skopt.gp_minimize(fit, search_space, n_calls=50, n_initial_points=10, callback=skopt_callback)
-    skopt_pbar.close()
+
+    SKIP_THIS = False
+    for keys in tqdm.tqdm(list(powerset()), desc='terms', position=1, leave=False):
+        if SKIP_THIS:
+            break
+        tracker = Tracker()
+        @skopt.utils.use_named_args(search_space)
+        def fit(**hparams):
+            tqdm.tqdm.write(f'fit with: {pprint.pformat(hparams)}')
+            torch_model = nn.Sequential(
+                nn.Dropout(hparams['dropout_p']),
+                nn.Linear(768, linear_structure.tokenizer.vocab_size)
+            ).to('cuda')
+            optimizer = optim.AdamW(
+                torch_model.parameters(),
+                lr=hparams['lr'],
+                betas=sorted([hparams["beta_a"], hparams["beta_b"]]),
+                weight_decay=hparams['weight_decay'],
+            )
+            criterion = nn.CrossEntropyLoss()
+            losses = collections.deque(maxlen=100)
+            accs = collections.deque(maxlen=100)
+            best_acc = 0
+            for EPOCH in tqdm.trange(20, position=3, desc='Epochs', leave=False):
+                with torch.set_grad_enabled(True):
+                    pbar = tqdm.tqdm(train, position=4, desc="Train", leave=False)
+                    for batch in pbar:
+                        optimizer.zero_grad()
+                        reps = sum(batch[k].to('cuda') for k in keys).detach()
+                        raw_logits = torch_model(reps)
+                        loss = criterion(raw_logits, batch['tgt_id'].to('cuda'))
+                        loss.backward()
+                        losses.append(loss.item())
+                        optimizer.step()
+                        acc = (raw_logits.argmax(-1) == batch['tgt_id'].to('cuda')).float().mean().item()
+                        accs.append(acc)
+                        pbar.set_description(f"Train L={sum(losses)/len(losses):.4f} A={sum(accs)/len(accs):.4f}")
+                with torch.set_grad_enabled(False):
+                    val_accs, val_losses = [], []
+                    pbar = tqdm.tqdm(dev, position=3, desc="Val", leave=False)
+                    for batch in pbar:
+                        reps = sum(batch[k].to('cuda') for k in keys).detach()
+                        raw_logits = torch_model(reps)
+                        loss = criterion(raw_logits, batch['tgt_id'].to('cuda'))
+                        val_losses.append(loss.item())
+                        acc = (raw_logits.argmax(-1) == batch['tgt_id'].to('cuda')).float().mean().item()
+                        val_accs.append(acc)
+                        pbar.set_description(f"Val L={sum(val_losses)/len(val_losses):.4f} A={sum(val_accs)/len(val_accs):.4f}")
+                    tqdm.tqdm.write(f"[Run {run} epoch {EPOCH}] model `{'+'.join(keys)}`: L={sum(val_losses)/len(val_losses)} A={sum(val_accs)/len(val_accs)}")
+                    if (sum(val_accs) / len(val_accs)) > tracker.best_acc:
+                        tqdm.tqdm.write('Dumping model.')
+                        tracker.best_acc = sum(val_accs) / len(val_accs)
+                        best_acc = tracker.best_acc
+                        torch.save(torch_model, MODELS_DIR / ('+'.join(keys) + f'.run-{run}.pt'))
+            return -best_acc
+
+        skopt_pbar = tqdm.trange(50, position=2, leave=False, desc=f"BayesOpt ({'+'.join(keys)})", disable=None)
+        def skopt_callback(partial_result):
+            skopt_pbar.update()
+        skopt.gp_minimize(fit, search_space, n_calls=50, n_initial_points=10, callback=skopt_callback)
+        skopt_pbar.close()
+
+    SKIP_THIS = True
+    for keys in powerset():
+        if SKIP_THIS:
+            break
+        criterion = nn.CrossEntropyLoss()
+        torch_model = torch.load(MODELS_DIR / ('+'.join(keys) + f'.run-{run}.pt'))
+        with torch.set_grad_enabled(False):
+            val_accs, val_losses = [], []
+            pbar = tqdm.tqdm(dev, desc="Val", leave=False)
+            for batch in pbar:
+                reps = sum(batch[k].to('cuda') for k in keys).detach()
+                raw_logits = torch_model(reps)
+                loss = criterion(raw_logits, batch['tgt_id'].to('cuda'))
+                val_losses.append(loss.item())
+                acc = (raw_logits.argmax(-1) == batch['tgt_id'].to('cuda')).float().mean().item()
+                val_accs.append(acc)
+                pbar.set_description(f"Val L={sum(val_losses)/len(val_losses):.4f} A={sum(val_accs)/len(val_accs):.4f}")
+            tqdm.tqdm.write(f"[Valid] model `{'+'.join(keys)}`: L={sum(val_losses)/len(val_losses)} A={sum(val_accs)/len(val_accs)}")
+
+
+    SKIP_THIS = True
+    if not SKIP_THIS:
+        all_targets = list(itertools.chain.from_iterable(batch['tgt_id'].tolist() for batch in dev))
+        all_target_counts = collections.Counter(all_targets)
+        most_frequent_tgt, count = all_target_counts.most_common(1)[0]
+        print("[Valid] MFS: ", count / len(all_targets))
+
+    print()
+    SKIP_THIS = False
+    for keys in powerset():
+         if SKIP_THIS:
+             break
+         criterion = nn.CrossEntropyLoss()
+         torch_model = torch.load(MODELS_DIR / ('+'.join(keys) + f'.run-{run}.pt'))
+         with torch.set_grad_enabled(False):
+             test_accs, test_losses = [], []
+             pbar = tqdm.tqdm(test, desc="Val", leave=False)
+             for batch in pbar:
+                 reps = sum(batch[k].to('cuda') for k in keys).detach()
+                 raw_logits = torch_model(reps)
+                 loss = criterion(raw_logits, batch['tgt_id'].to('cuda'))
+                 test_losses.append(loss.item())
+                 acc = (raw_logits.argmax(-1) == batch['tgt_id'].to('cuda')).float().mean().item()
+                 test_accs.append(acc)
+                 pbar.set_description(f"L={sum(test_losses)/len(test_losses):.4f} A={sum(test_accs)/len(test_accs):.4f}")
+             infoline = f"[Test] model `{'+'.join(keys)}`: L={sum(test_losses)/len(test_losses)} A={sum(test_accs)/len(test_accs)}"
+             with open('mlm-results-all.txt', 'a') as ostr:
+                 print(infoline, file=ostr)
+             tqdm.tqdm.write(infoline)
+
+    SKIP_THIS = True
+    if not SKIP_THIS:
+        all_test_targets = list(itertools.chain.from_iterable(batch['tgt_id'].tolist() for batch in test))
+        all_test_target_counts = collections.Counter(all_test_targets)
+        print("[Test] MFS: ", all_test_target_counts[most_frequent_tgt] / len(all_test_targets))

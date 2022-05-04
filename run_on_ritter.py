@@ -25,7 +25,7 @@ import linear_structure
 # TUNED_MODEL = AutoModel.from_pretrained(TUNED_MODEL_NAME)
 # TUNED_MODEL_TOK = AutoTokenizer.from_pretrained(TUNED_MODEL_NAME)
 
-CACHE_DIR = pathlib.Path('data') / 'ner' / 'untuned'
+CACHE_DIR = pathlib.Path('data') / 'ner' / 'tuned'
 CACHE_DIR.mkdir(exist_ok=True, parents=True)
 
 IPT_SIZE = 768
@@ -159,7 +159,7 @@ class BestTracker():
             self.best = acc
 
 
-MODELS_DIR = pathlib.Path('models-ner') / 'untuned'
+MODELS_DIR = pathlib.Path('models-ner') / 'tuned'
 MODELS_DIR.mkdir(exist_ok=True, parents=True)
 
 train, dev, test = get_dataloaders(batch_size=BATCH_SIZE)
@@ -281,14 +281,15 @@ for keys_to_sum in powerset():
 
     full_result = skopt.gp_minimize(fit, search_space, n_calls=100, n_initial_points=10, callback=skopt_callback)
     skopt_pbar.close()
-    with open('ritter-devresults.txt', 'a') as ostr:
+    with open('ritter-devresults-5.txt', 'a') as ostr:
         print('+'.join(keys_to_sum), best_tracker.best, file=ostr)
 
 DEVICE = 'cpu'
 
 all_preds = {}
-with open('ritter-testresults-untuned.txt', 'w') as ostr:
+with open('ritter-testresults-tuned-5.txt', 'w') as ostr:
     for keys_to_sum in powerset():
+        all_preds[keys_to_sum] = []
         ner_model = torch.load(MODELS_DIR / ("_".join(keys_to_sum) + '.pt'), map_location=torch.device(DEVICE))
         pbar = tqdm.tqdm(dev, desc="Test", leave=False, disable=None)
         ner_model.eval()
@@ -327,4 +328,4 @@ for i, keys_1 in enumerate(keys_in_order):
     for j, keys_2 in enumerate(keys_in_order):
         matrix_view[i, j] = sklearn.metrics.f1_score(all_preds[keys_1], all_preds[keys_2], average='macro')
 # print(matrix_view.tolist())
-np.save('f1-classif-ritter-untuned.npy', matrix_view)
+np.save('f1-classif-ritter-tuned-5.npy', matrix_view)

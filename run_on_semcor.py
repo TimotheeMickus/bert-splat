@@ -300,159 +300,161 @@ MODELS_DIR.mkdir(exist_ok=True, parents=True)
 
 train, dev, test = get_dataloaders(batch_size=BATCH_SIZE)
 
-for keys_to_sum in powerset():
-    print("Using as input: " + " + ".join(keys_to_sum))
-    MODEL_NAME = MODELS_DIR / ("_".join(keys_to_sum) + '.pt')
-    best_tracker = BestTracker(MODEL_NAME)
 
-    tqdm.tqdm.write("data:\n"+
-        f"\ttrain: {len(train.dataset)}\n"+
-        f"\tdev: {len(dev.dataset)}\n"+
-        f"\ttest: {len(test.dataset)}")
-    # this model is cheap enough to run on CPU in a decent amount of time
-    search_space = [
-        skopt.space.Real(0., .5, "uniform", name="dropout_p"),
-        skopt.space.Real(1.e-5, 1.0, "log-uniform", name="lr"),
-        skopt.space.Real(.9, 1. - 1.e-3, "log-uniform", name="beta_a"),
-        skopt.space.Real(.9, 1. - 1.e-3, "log-uniform", name="beta_b"),
-        skopt.space.Real(0., 1., "uniform", name="weight_decay"),
-        # skopt.space.Categorical([True, False], name="init_wn"),
-        skopt.space.Categorical([True, False], name="use_scheduler"),
-    ]
+for RUN in tqdm.trange(2,4, desc="runs", position=0):
+    for keys_to_sum in tqdm.tqdm(powerset(), total=15, desc="terms", position=1):
+        tqdm.tqdm.write("Using as input: " + " + ".join(keys_to_sum))
+        MODEL_NAME = MODELS_DIR / ("_".join(keys_to_sum) + f'.{RUN}.pt')
+        best_tracker = BestTracker(MODEL_NAME)
 
-    @skopt.utils.use_named_args(search_space)
-    def fit(**hparams):
-        tqdm.tqdm.write("current fit:\n" + pprint.pformat(hparams))
-        wsd_model = nn.Sequential(
-            nn.Linear(IPT_SIZE, IPT_SIZE),
-            nn.ReLU(),
-            nn.Dropout(hparams['dropout_p']),
-            nn.Linear(IPT_SIZE, len(tags_stoi), bias=False)
-        ).to(DEVICE)
+        tqdm.tqdm.write("data:\n"+
+            f"\ttrain: {len(train.dataset)}\n"+
+            f"\tdev: {len(dev.dataset)}\n"+
+            f"\ttest: {len(test.dataset)}")
+        # this model is cheap enough to run on CPU in a decent amount of time
+        search_space = [
+            skopt.space.Real(0., .5, "uniform", name="dropout_p"),
+            skopt.space.Real(1.e-5, 1.0, "log-uniform", name="lr"),
+            skopt.space.Real(.9, 1. - 1.e-3, "log-uniform", name="beta_a"),
+            skopt.space.Real(.9, 1. - 1.e-3, "log-uniform", name="beta_b"),
+            skopt.space.Real(0., 1., "uniform", name="weight_decay"),
+            # skopt.space.Categorical([True, False], name="init_wn"),
+            skopt.space.Categorical([True, False], name="use_scheduler"),
+        ]
 
-        @torch.no_grad()
-        def init_output_embs_from_wn_():
-            wn_views = get_or_compute_bert_wn_embs()
-            pbar = tqdm.tqdm(wn_views.items(), total=len(wn_views), leave=False, desc="Init", disable=None)
-            for wn_key, bert_emb in pbar:
-                idx = tags_stoi[wn_key]
-                wsd_model[-1].weight[idx,:] = bert_emb.to(DEVICE)
-                # wsd_model[-1].bias[:] = 0
-            torch.nn.init.eye_(wsd_model[0].weight)
-            torch.nn.init.zeros_(wsd_model[0].bias)
+        @skopt.utils.use_named_args(search_space)
+        def fit(**hparams):
+            tqdm.tqdm.write("current fit:\n" + pprint.pformat(hparams))
+            wsd_model = nn.Sequential(
+                nn.Linear(IPT_SIZE, IPT_SIZE),
+                nn.ReLU(),
+                nn.Dropout(hparams['dropout_p']),
+                nn.Linear(IPT_SIZE, len(tags_stoi), bias=False)
+            ).to(DEVICE)
 
-        # if hparams['init_wn']:
-        #     init_output_embs_from_wn_()
+            @torch.no_grad()
+            def init_output_embs_from_wn_():
+                wn_views = get_or_compute_bert_wn_embs()
+                pbar = tqdm.tqdm(wn_views.items(), total=len(wn_views), leave=False, desc="Init", disable=None)
+                for wn_key, bert_emb in pbar:
+                    idx = tags_stoi[wn_key]
+                    wsd_model[-1].weight[idx,:] = bert_emb.to(DEVICE)
+                    # wsd_model[-1].bias[:] = 0
+                torch.nn.init.eye_(wsd_model[0].weight)
+                torch.nn.init.zeros_(wsd_model[0].bias)
 
-        tqdm.tqdm.write("model:\n" + str(wsd_model))
-        max_acc = -float('inf')
-        optimizer = optim.Adam(wsd_model.parameters(), betas=sorted([hparams["beta_a"], hparams["beta_b"]]), lr=hparams["lr"], weight_decay=hparams["weight_decay"])
-        criterion = nn.CrossEntropyLoss()
-        if hparams['use_scheduler']:
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, threshold=0.005)
-        for epoch in tqdm.trange(EPOCHS, desc="Epochs", leave=False, disable=None):
-            pbar = tqdm.tqdm(train, desc="Train", leave=False, disable=None)
-            wsd_model.train()
-            losses = collections.deque(maxlen=100)
-            accs = collections.deque(maxlen=100)
-            for batch in pbar:
-                optimizer.zero_grad()
+            # if hparams['init_wn']:
+            #     init_output_embs_from_wn_()
+
+            tqdm.tqdm.write("model:\n" + str(wsd_model))
+            max_acc = -float('inf')
+            optimizer = optim.Adam(wsd_model.parameters(), betas=sorted([hparams["beta_a"], hparams["beta_b"]]), lr=hparams["lr"], weight_decay=hparams["weight_decay"])
+            criterion = nn.CrossEntropyLoss()
+            if hparams['use_scheduler']:
+                scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, threshold=0.005)
+            for epoch in tqdm.trange(EPOCHS, desc="Epochs", leave=False, disable=None, position=3):
+                pbar = tqdm.tqdm(train, desc="Train", leave=False, disable=None, position=4)
+                wsd_model.train()
+                losses = collections.deque(maxlen=100)
+                accs = collections.deque(maxlen=100)
+                for batch in pbar:
+                    optimizer.zero_grad()
+                    with torch.no_grad():
+                        all_ipts = sum(batch[key].to(DEVICE) for key in keys_to_sum)
+                    mlp_output = wsd_model(all_ipts)
+                    tgt = batch['tgt_idx'].view(-1).to(DEVICE)
+                    # using a mask means we can use the same matrix for all preds, and zero out irrelevant items
+                    lemma_specific_output = mlp_output.masked_fill(batch['lemma_mask'].to(DEVICE), -float('inf'))
+                    loss = criterion(lemma_specific_output, tgt)
+                    acc = (F.softmax(lemma_specific_output, dim=-1).argmax(dim=-1) ==  tgt).float().mean()
+                    loss.backward()
+                    optimizer.step()
+                    losses.append(loss.item())
+                    accs.append(acc.item())
+                    pbar.set_description(f"Train (L={sum(losses)/len(losses):.4f}, A={sum(accs)/len(accs):.4f})")
+                pbar.close()
+                pbar = tqdm.tqdm(dev, desc="Val.", leave=False, disable=None)
+                wsd_model.eval()
+                running_loss, total_items = 0, 0
+                total_acc = 0
                 with torch.no_grad():
-                    all_ipts = sum(batch[key].to(DEVICE) for key in keys_to_sum)
-                mlp_output = wsd_model(all_ipts)
-                tgt = batch['tgt_idx'].view(-1).to(DEVICE)
-                # using a mask means we can use the same matrix for all preds, and zero out irrelevant items
-                lemma_specific_output = mlp_output.masked_fill(batch['lemma_mask'].to(DEVICE), -float('inf'))
-                loss = criterion(lemma_specific_output, tgt)
-                acc = (F.softmax(lemma_specific_output, dim=-1).argmax(dim=-1) ==  tgt).float().mean()
-                loss.backward()
-                optimizer.step()
-                losses.append(loss.item())
-                accs.append(acc.item())
-                pbar.set_description(f"Train (L={sum(losses)/len(losses):.4f}, A={sum(accs)/len(accs):.4f})")
-            pbar.close()
-            pbar = tqdm.tqdm(dev, desc="Val.", leave=False, disable=None)
+                    for batch in pbar:
+                        all_ipts = sum(batch[key].to(DEVICE) for key in keys_to_sum)
+                        mlp_output = wsd_model(all_ipts)
+                        tgt = batch['tgt_idx'].view(-1).to(DEVICE)
+                        lemma_specific_output = mlp_output.masked_fill(batch['lemma_mask'].to(DEVICE), -float('inf'))
+                        loss = F.cross_entropy(lemma_specific_output, tgt, reduction='sum')
+                        acc = (F.softmax(lemma_specific_output, dim=-1).argmax(dim=-1) == tgt).sum()
+                        running_loss += loss.item()
+                        total_acc += acc.item()
+                        total_items += batch['tgt_idx'].numel()
+                        pbar.set_description(f"Valid (L={running_loss/total_items:.4f}, A={total_acc/total_items:.4f})")
+                tqdm.tqdm.write(f"Epoch {epoch}, loss: {running_loss/total_items}, acc.: {total_acc/total_items}")
+                max_acc = max(max_acc, total_acc/total_items)
+                best_tracker.try_dump(wsd_model, total_acc/total_items)
+                if hparams['use_scheduler']:
+                    scheduler.step(running_loss/total_items)
+                pbar.close()
+            return -max_acc
+
+        if (MODELS_DIR / ("_".join(keys_to_sum) + f".{RUN}.pkl")).is_file():
+            skopt_callback = None
+            previous_dump = skopt.load(MODELS_DIR / ("_".join(keys_to_sum) + f".{RUN}.pkl"))
+            if len(previous_dump['x_iters']) == 100:
+                tqdm.tqdm.write(f"This config ({'+'.join(keys_to_sum)}) is already done. Continuing...")
+                continue
+
+        skopt_pbar = tqdm.trange(100, position=2, leave=False, desc=f"BayesOpt ({'+'.join(keys_to_sum)})", disable=None)
+        def skopt_callback(partial_result):
+            skopt.dump(partial_result, MODELS_DIR / ("_".join(keys_to_sum) + f".{RUN}.pkl"), store_objective=False)
+            skopt_pbar.update()
+
+        full_result = skopt.gp_minimize(fit, search_space, n_calls=100, n_initial_points=10, callback=skopt_callback)
+        skopt_pbar.close()
+        with open(f'semcor-devresults.{RUN}.txt', 'a') as ostr:
+            print('+'.join(keys_to_sum), best_tracker.best, file=ostr)
+
+    DEVICE = 'cpu'
+
+    all_preds = {}
+    with open(f'semcor-testresults.{RUN}.txt', 'w') as ostr:
+        for keys_to_sum in powerset():
+            wsd_model = torch.load(MODELS_DIR / ("_".join(keys_to_sum) + '.pt'), map_location=torch.device(DEVICE))
+            pbar = tqdm.tqdm(test, desc="Test", leave=False, disable=None)
             wsd_model.eval()
             running_loss, total_items = 0, 0
             total_acc = 0
+            all_preds[keys_to_sum] = []
+            all_targets = []
             with torch.no_grad():
                 for batch in pbar:
                     all_ipts = sum(batch[key].to(DEVICE) for key in keys_to_sum)
                     mlp_output = wsd_model(all_ipts)
                     tgt = batch['tgt_idx'].view(-1).to(DEVICE)
+                    all_targets.extend(tgt.tolist())
                     lemma_specific_output = mlp_output.masked_fill(batch['lemma_mask'].to(DEVICE), -float('inf'))
                     loss = F.cross_entropy(lemma_specific_output, tgt, reduction='sum')
-                    acc = (F.softmax(lemma_specific_output, dim=-1).argmax(dim=-1) == tgt).sum()
+                    lemma_preds = F.softmax(lemma_specific_output, dim=-1).argmax(dim=-1).view(-1)
+                    all_preds[keys_to_sum].extend(lemma_preds.detach().tolist())
+                    acc = (lemma_preds == tgt).sum()
                     running_loss += loss.item()
                     total_acc += acc.item()
                     total_items += batch['tgt_idx'].numel()
                     pbar.set_description(f"Valid (L={running_loss/total_items:.4f}, A={total_acc/total_items:.4f})")
-            tqdm.tqdm.write(f"Epoch {epoch}, loss: {running_loss/total_items}, acc.: {total_acc/total_items}")
-            max_acc = max(max_acc, total_acc/total_items)
-            best_tracker.try_dump(wsd_model, total_acc/total_items)
-            if hparams['use_scheduler']:
-                scheduler.step(running_loss/total_items)
-            pbar.close()
-        return -max_acc
+            tqdm.tqdm.write(f"Model {'+'.join(keys_to_sum)}, loss: {running_loss/total_items}, acc.: {total_acc/total_items}, f1 (macro): {sklearn.metrics.f1_score(all_targets, all_preds[keys_to_sum], average='macro')}, f1 (micro): {sklearn.metrics.f1_score(all_targets, all_preds[keys_to_sum], average='micro')}")
+        print('+'.join(keys_to_sum), total_acc/total_items, file=ostr)
 
-    if (MODELS_DIR / ("_".join(keys_to_sum) + ".pkl")).is_file():
-        skopt_callback = None
-        previous_dump = skopt.load(MODELS_DIR / ("_".join(keys_to_sum) + ".pkl"))
-        if len(previous_dump['x_iters']) == 100:
-            print(f"This config ({'+'.join(keys_to_sum)}) is already done. Continuing...")
-            continue
-
-    skopt_pbar = tqdm.trange(100, position=2, leave=False, desc=f"BayesOpt ({'+'.join(keys_to_sum)})", disable=None)
-    def skopt_callback(partial_result):
-        skopt.dump(partial_result, MODELS_DIR / ("_".join(keys_to_sum) + ".pkl"), store_objective=False)
-        skopt_pbar.update()
-
-    full_result = skopt.gp_minimize(fit, search_space, n_calls=100, n_initial_points=10, callback=skopt_callback)
-    skopt_pbar.close()
-    with open('semcor-devresults.txt', 'a') as ostr:
-        print('+'.join(keys_to_sum), best_tracker.best, file=ostr)
-
-DEVICE = 'cpu'
-
-all_preds = {}
-with open('semcor-testresults.txt', 'w') as ostr:
-    for keys_to_sum in powerset():
-        wsd_model = torch.load(MODELS_DIR / ("_".join(keys_to_sum) + '.pt'), map_location=torch.device(DEVICE))
-        pbar = tqdm.tqdm(test, desc="Test", leave=False, disable=None)
-        wsd_model.eval()
-        running_loss, total_items = 0, 0
-        total_acc = 0
-        all_preds[keys_to_sum] = []
-        all_targets = []
-        with torch.no_grad():
-            for batch in pbar:
-                all_ipts = sum(batch[key].to(DEVICE) for key in keys_to_sum)
-                mlp_output = wsd_model(all_ipts)
-                tgt = batch['tgt_idx'].view(-1).to(DEVICE)
-                all_targets.extend(tgt.tolist())
-                lemma_specific_output = mlp_output.masked_fill(batch['lemma_mask'].to(DEVICE), -float('inf'))
-                loss = F.cross_entropy(lemma_specific_output, tgt, reduction='sum')
-                lemma_preds = F.softmax(lemma_specific_output, dim=-1).argmax(dim=-1).view(-1)
-                all_preds[keys_to_sum].extend(lemma_preds.detach().tolist())
-                acc = (lemma_preds == tgt).sum()
-                running_loss += loss.item()
-                total_acc += acc.item()
-                total_items += batch['tgt_idx'].numel()
-                pbar.set_description(f"Valid (L={running_loss/total_items:.4f}, A={total_acc/total_items:.4f})")
-        tqdm.tqdm.write(f"Model {'+'.join(keys_to_sum)}, loss: {running_loss/total_items}, acc.: {total_acc/total_items}, f1 (macro): {sklearn.metrics.f1_score(all_targets, all_preds[keys_to_sum], average='macro')}, f1 (micro): {sklearn.metrics.f1_score(all_targets, all_preds[keys_to_sum], average='micro')}")
-    print('+'.join(keys_to_sum), total_acc/total_items, file=ostr)
-
-import numpy as np
-# compat with paper for figures
-keys_in_order = [
-    ('ipt',), ('mha',), ('ff',), ('norm',),
-    ('ipt', 'mha'), ('ipt', 'ff'), ('ipt', 'norm'), ('mha', 'ff'), ('norm', 'mha'), ('norm', 'ff'),
-    ('ipt', 'mha', 'ff'), ('ipt', 'norm', 'mha'),  ('ipt', 'norm', 'ff'), ('norm', 'mha', 'ff'),
-    ('ipt', 'norm', 'mha', 'ff')
-]
-matrix_view = np.zeros((len(all_preds), len(all_preds)))
-for i, keys_1 in enumerate(keys_in_order):
-    for j, keys_2 in enumerate(keys_in_order):
-        matrix_view[i, j] = sklearn.metrics.f1_score(all_preds[keys_1], all_preds[keys_2], average='micro')
-# print(matrix_view.tolist())
-np.save('f1-classif-semcor.npy', matrix_view)
+    import numpy as np
+    # compat with paper for figures
+    keys_in_order = [
+        ('ipt',), ('mha',), ('ff',), ('norm',),
+        ('ipt', 'mha'), ('ipt', 'ff'), ('ipt', 'norm'), ('mha', 'ff'), ('norm', 'mha'), ('norm', 'ff'),
+        ('ipt', 'mha', 'ff'), ('ipt', 'norm', 'mha'),  ('ipt', 'norm', 'ff'), ('norm', 'mha', 'ff'),
+        ('ipt', 'norm', 'mha', 'ff')
+    ]
+    matrix_view = np.zeros((len(all_preds), len(all_preds)))
+    for i, keys_1 in enumerate(keys_in_order):
+        for j, keys_2 in enumerate(keys_in_order):
+            matrix_view[i, j] = sklearn.metrics.f1_score(all_preds[keys_1], all_preds[keys_2], average='micro')
+    # print(matrix_view.tolist())
+    np.save(f'f1-classif-semcor.{RUN}.npy', matrix_view)
