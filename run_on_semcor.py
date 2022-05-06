@@ -1,5 +1,6 @@
 import collections
 import itertools
+import json
 import functools
 import math
 import pathlib
@@ -19,8 +20,6 @@ from torch.utils.data import DataLoader, Dataset
 import tqdm
 import sklearn.metrics
 import skopt
-
-import linear_structure
 
 DROP_MONOSEMOUS = True
 
@@ -50,7 +49,17 @@ def build_refs():
         for k, v in refs.items()
     }
 
-refs = build_refs()
+def build_or_get_refs(REFS_FILENAME="refs-semcor.json"):
+    if pathlib.Path(REFS_FILENAME).is_file():
+        with open(REFS_FILENAME, 'r') as istr:
+            return json.load(istr)
+    else:
+        refs = build_refs()
+        with open(REFS_FILENAME, 'w') as ostr:
+            json.dump(refs, ostr)
+        return refs
+
+refs = build_or_get_refs()
 refs_itos = sorted(refs.keys())
 refs_stoi = {
     lemma: idx
@@ -96,6 +105,7 @@ def toks_to_str(tokens):
 # NB: Quite possibly it would be better without my hack-in to extract factors.
 def parse_semcor():
     """convert semcor into usable items"""
+    import linear_structure
     all_items = []
     was_grad_enabled = torch.is_grad_enabled()
     torch.set_grad_enabled(False)
@@ -260,6 +270,7 @@ def get_or_compute_bert_wn_embs(cache_dir=CACHE_DIR):
         return cached_bert_embs
     except FileNotFoundError:
         tqdm.tqdm.write('computing BERT WN embs, this might take a while...')
+        import linear_structure
         wn_key_to_bert_emb = {}
         definitions = []
         for wn_key in tqdm.tqdm(tags_stoi.keys(), leave=False, desc="Init", disable=None):
@@ -301,7 +312,7 @@ MODELS_DIR.mkdir(exist_ok=True, parents=True)
 train, dev, test = get_dataloaders(batch_size=BATCH_SIZE)
 
 
-for RUN in tqdm.trange(2,4, desc="runs", position=0):
+for RUN in tqdm.trange(2,3, desc="runs", position=0):
     for keys_to_sum in tqdm.tqdm(powerset(), total=15, desc="terms", position=1):
         tqdm.tqdm.write("Using as input: " + " + ".join(keys_to_sum))
         MODEL_NAME = MODELS_DIR / ("_".join(keys_to_sum) + f'.{RUN}.pt')
@@ -414,12 +425,13 @@ for RUN in tqdm.trange(2,4, desc="runs", position=0):
         with open(f'semcor-devresults.{RUN}.txt', 'a') as ostr:
             print('+'.join(keys_to_sum), best_tracker.best, file=ostr)
 
+    orig_device = DEVICE
     DEVICE = 'cpu'
 
     all_preds = {}
     with open(f'semcor-testresults.{RUN}.txt', 'w') as ostr:
         for keys_to_sum in powerset():
-            wsd_model = torch.load(MODELS_DIR / ("_".join(keys_to_sum) + '.pt'), map_location=torch.device(DEVICE))
+            wsd_model = torch.load(MODELS_DIR / ("_".join(keys_to_sum) + f'.{RUN}.pt'), map_location=torch.device(DEVICE))
             pbar = tqdm.tqdm(test, desc="Test", leave=False, disable=None)
             wsd_model.eval()
             running_loss, total_items = 0, 0
@@ -458,3 +470,4 @@ for RUN in tqdm.trange(2,4, desc="runs", position=0):
             matrix_view[i, j] = sklearn.metrics.f1_score(all_preds[keys_1], all_preds[keys_2], average='micro')
     # print(matrix_view.tolist())
     np.save(f'f1-classif-semcor.{RUN}.npy', matrix_view)
+    DEVICE = orig_device
