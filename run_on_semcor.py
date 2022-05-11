@@ -306,13 +306,14 @@ class BestTracker():
             self.best = acc
 
 
-MODELS_DIR = pathlib.Path('models')
-MODELS_DIR.mkdir(exist_ok=True, parents=True)
+MODELS_DIR_BASE = pathlib.Path('models-wsd')
+MODELS_DIR_BASE.mkdir(exist_ok=True, parents=True)
 
 train, dev, test = get_dataloaders(batch_size=BATCH_SIZE)
 
 
-for RUN in tqdm.trange(2,3, desc="runs", position=0):
+for RUN in tqdm.trange(1,6, desc="runs", position=0):
+    MODELS_DIR = MODELS_DIR_BASE / str(RUN)
     for keys_to_sum in tqdm.tqdm(powerset(), total=15, desc="terms", position=1):
         tqdm.tqdm.write("Using as input: " + " + ".join(keys_to_sum))
         MODEL_NAME = MODELS_DIR / ("_".join(keys_to_sum) + f'.{RUN}.pt')
@@ -425,9 +426,11 @@ for RUN in tqdm.trange(2,3, desc="runs", position=0):
         with open(f'semcor-devresults.{RUN}.txt', 'a') as ostr:
             print('+'.join(keys_to_sum), best_tracker.best, file=ostr)
 
-    orig_device = DEVICE
-    DEVICE = 'cpu'
+orig_device = DEVICE
+DEVICE = 'cpu'
 
+for RUN in tqdm.trange(1,6, desc="runs", position=0):
+    MODELS_DIR = MODELS_DIR_BASE / str(RUN)
     all_preds = {}
     with open(f'semcor-testresults.{RUN}.txt', 'w') as ostr:
         for keys_to_sum in powerset():
@@ -454,7 +457,7 @@ for RUN in tqdm.trange(2,3, desc="runs", position=0):
                     total_items += batch['tgt_idx'].numel()
                     pbar.set_description(f"Valid (L={running_loss/total_items:.4f}, A={total_acc/total_items:.4f})")
             tqdm.tqdm.write(f"Model {'+'.join(keys_to_sum)}, loss: {running_loss/total_items}, acc.: {total_acc/total_items}, f1 (macro): {sklearn.metrics.f1_score(all_targets, all_preds[keys_to_sum], average='macro')}, f1 (micro): {sklearn.metrics.f1_score(all_targets, all_preds[keys_to_sum], average='micro')}")
-        print('+'.join(keys_to_sum), total_acc/total_items, file=ostr)
+            print('+'.join(keys_to_sum), total_acc/total_items, file=ostr)
 
     import numpy as np
     # compat with paper for figures

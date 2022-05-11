@@ -117,7 +117,7 @@ search_space = [
     skopt.space.Real(0., .5, "uniform", name="dropout_p"),
 ]
 
-for run in tqdm.trange(4,6, desc="run", position=0, leave=True):
+for run in tqdm.trange(1,6, desc="run", position=0, leave=True):
 #run = 2
     train, dev, test = get_dataloaders()
 
