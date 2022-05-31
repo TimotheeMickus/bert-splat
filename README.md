@@ -13,7 +13,7 @@ embeddings in sub-terms and define some other useful tools.
 The remaining scripts correspond to different (sub-)experiments.
 
 
-# Ref
+## References
 If you found the paper or this repository useful, don't hesitate to cite our
 paper:
 ```
