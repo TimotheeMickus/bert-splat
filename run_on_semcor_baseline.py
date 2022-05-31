@@ -1,3 +1,7 @@
+"""
+Useful metrics in Section 5.
+"""
+
 import collections
 import itertools
 import functools

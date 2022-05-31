@@ -1,3 +1,7 @@
+"""
+Corresponds to section 5 "Classifiers" models
+"""
+
 import collections
 import itertools
 import json

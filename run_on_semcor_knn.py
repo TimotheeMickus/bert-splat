@@ -1,3 +1,7 @@
+"""
+Corresponds to section 5 "KNN" models
+"""
+
 import collections
 import itertools
 import functools

@@ -1,3 +1,7 @@
+"""
+Corresponds to Section 4, "Learned" models.
+"""
+
 import itertools
 import pathlib
 import pprint

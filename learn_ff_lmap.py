@@ -1,3 +1,9 @@
+"""
+Corresponds to Figure 2 in the paper.
+
+You most likely need to tinker with linear_structure.py first to get the raw
+data for this experiment.
+"""
 import torch, pickle
 import numpy as np
 import sklearn.metrics
@@ -20,20 +26,21 @@ def yield_items(layer=12):
 	examples_stream = filter(lambda p: (p[0] % 12) == layer, examples_stream)
 	examples_stream = map(lambda p: (p[1][0].squeeze(0).numpy(), p[1][1].squeeze(0).numpy()), examples_stream)
 	yield from examples_stream
-	
-for layer in range(1, 13):
-	all_src, all_tgt = [], []
-	for a, b in tqdm.tqdm(yield_items(layer=layer), desc=f'read (layer={layer})', total=10_000):
-		all_src.append(a)
-		all_tgt.append(b)
 
-	all_src = np.vstack(all_src)
-	all_tgt = np.vstack(all_tgt)
-	
-	all_src = sklearn.preprocessing.StandardScaler().fit_transform(all_src)
-	all_tgt = sklearn.preprocessing.StandardScaler().fit_transform(all_tgt)
-	
-	reg = sklearn.linear_model.LinearRegression(n_jobs=-1)
-	reg.fit(all_src, all_tgt)
-		
-	print(layer, reg.score(all_src, all_tgt))
+for run in range(1, 2):
+	for layer in range(1, 13):
+		all_src, all_tgt = [], []
+		for a, b in tqdm.tqdm(yield_items(layer=layer), desc=f'read (layer={layer})', total=10_000):
+			all_src.append(a)
+			all_tgt.append(b)
+
+		all_src = np.vstack(all_src)
+		all_tgt = np.vstack(all_tgt)
+
+		all_src = sklearn.preprocessing.StandardScaler().fit_transform(all_src)
+		all_tgt = sklearn.preprocessing.StandardScaler().fit_transform(all_tgt)
+
+		reg = sklearn.linear_model.LinearRegression(n_jobs=-1)
+		reg.fit(all_src, all_tgt)
+
+		print(run, layer, reg.score(all_src, all_tgt))

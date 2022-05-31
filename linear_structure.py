@@ -1,3 +1,39 @@
+"""
+ABANDON ALL HOPE YE WHO ENTER HERE
+
+This code is a hadge-podge of monkey-patches  and hacks, based on the
+HuggingFace Transformers library. It is not clean, it is not friendly, it is not
+optimized. It is a hell of random additions piled up on the spot to get me what
+I needed at the time.
+
+With this in mind, here are few pointers to help you out through this specific
+circle of programmer's hell.
+    1/ The whole code has only been tested and used for transformers.BertModel
+variants. I have no idea how well this would translate to other HuggingFace
+models, you're on your own.
+    2/ The model that's going to be worked on corresponds to the `MODEL_NAME`
+variable. It should be a valid HuggingFace name, so a path to your custom Bert
+probably works, but again, keep in mind this is hell.
+    3/ The general logic of this script is that I duplicated the `forward(...)`
+of every single Bert submodule, and hacked them to return both their normal
+output as well as the linear subterm I was interested in. These subterms
+correspond to the various `keywords` dictionary (because not only is my code
+shite, my naming sense is awful as well!). These duplicated `forward(...)`
+should all be named `run_XXX(...)`, with XXX the corresponding submodule
+variable name.
+    4/ sub-terms are accessed using the `get_factors(...)`,
+`read_factors_last_layer(...)` & other similar functions.
+    5/ beware of the `pickle_file_` variable! Its purpose is to drop stuff I
+need to access later on, e.g. the feedforward inputs and outputs. You want to
+explicitly set that to None to avoid having maxive dumps of data.
+    6/ the importance metric stuff used to visualize the subterms relies on the
+`tally_XXX(...)` functions.
+    7/ calling this script on its own will either compute the raw data to
+visualize cross-layer importance of the four terms, or run MLM predictions based
+on the default output projection. This behavior is controled with the `MODE`
+variable.
+"""
+
 import math
 
 import torch
@@ -324,15 +360,15 @@ def run_bert_layer(
 
     return outputs, keywords
 
-# import pickle
-# pickle_file = open('ff_sole.pkl', 'wb')
+import pickle
+pickle_file_ = open('ff_sole.pkl', 'wb')
 
-def run_feed_forward_chunk(self, attention_output, pickle_file=None):
+def run_feed_forward_chunk(self, attention_output, pickle_file=pickle_file_):
     intermediate_output = self.intermediate(attention_output)
     output, keywords = run_bert_output(self.output, intermediate_output, attention_output)
-    # if pickle_file is not None:
-    #     pickle.dump(attention_output.detach(), pickle_file)
-    #     pickle.dump(keywords['raw_hidden_states'].detach(), pickle_file)
+    if pickle_file is not None:
+        pickle.dump(attention_output.detach(), pickle_file)
+        pickle.dump(keywords['raw_hidden_states'].detach(), pickle_file)
     return output, keywords
 
 def run_bert_encoder(
@@ -1151,6 +1187,7 @@ if __name__ == "__main__" and MODE == 'prop-across-layers':
     joblib.dump(norm, f"norm_{model_id}.npy")
     joblib.dump(mha, f"mha_{model_id}.npy")
     joblib.dump(ff, f"ff_{model_id}.npy")
+    pickle_file_.close()
 
 
 if __name__ == '__main__' and MODE == 'last-layer-mlm-perf':

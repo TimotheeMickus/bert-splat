@@ -1,3 +1,9 @@
+"""
+Corresponds to Section 6.
+You will need to tweak linear_structure.py to get it to point to other models
+than the default Bert base.
+"""
+
 import collections
 import itertools
 import functools
