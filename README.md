@@ -1,7 +1,8 @@
 # Github repo for "How To Dissect a Muppet"
 
 This is the repository for "How to Dissect a Muppet: The Structure of
-Transformer Embedding Spaces", to appear in TACL.
+Transformer Embedding Spaces", to appear in TACL. Here's an [arxiv 
+preprint](https://arxiv.org/abs/2206.03529) for now.
 
 **Note:** the code here is not user-friendly. You're welcome to rework on it on
 your own, we're only distirbuting it for future reference and reproductibility.
@@ -17,7 +18,13 @@ The remaining scripts correspond to different (sub-)experiments.
 If you found the paper or this repository useful, don't hesitate to cite our
 paper:
 ```
-An empty code box for now.
+@misc{mickus-etal-2022-dissect-preprint,
+  author = {Mickus, Timothee and Paperno, Denis and Constant, Mathieu},
+  title = {How to Dissect a Muppet: The Structure of Transformer Embedding Spaces},
+  publisher = {arXiv},
+  year = {2022}
+}
+
 ```
 For all intents and purposes, you can consider this repository licensed under
 CC-BY-SA.
