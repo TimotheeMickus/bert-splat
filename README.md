@@ -5,6 +5,8 @@ Transformer Embedding Spaces", [in TACL](https://aclanthology.org/2022.tacl-1.57
 
 **Note:** the code here is not user-friendly. You're welcome to rework on it on
 your own, we're only distributing it for future reference and reproductibility.
+If you're looking for a less messy place to start, maybe check out 
+[this other repo](https://github.com/TimotheeMickus/seq2seq-splat) instead?
 
 ## How is this repository structured?
 The main bit is to be found in `linear_structure.py`;  that's where we decompose
@@ -16,7 +18,7 @@ The remaining scripts correspond to different (sub-)experiments.
 ## References
 If you found the paper or this repository useful, don't hesitate to cite our
 paper:
-```
+```bibtex
 @article{mickus-etal-2022-dissect,
     title = "How to Dissect a {M}uppet: The Structure of Transformer Embedding Spaces",
     author = "Mickus, Timothee  and
